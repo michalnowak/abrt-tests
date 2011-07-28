@@ -40,7 +40,8 @@
 static gboolean persistent_notification;
 static GtkStatusIcon *ap_status_icon;
 static GtkWidget *ap_menu;
-static const char *ap_last_problem_dir;
+static char *ap_last_problem_dir;
+static char **s_dirs;
 //static bool ap_daemon_running;
 #define ap_daemon_running 1
 
@@ -144,7 +145,7 @@ static void hide_icon(void)
 //this action should open the reporter dialog directly, without showing the main window
 static void action_report(NotifyNotification *notification, gchar *action, gpointer user_data)
 {
-    if (ap_daemon_running)
+    if (ap_daemon_running && ap_last_problem_dir)
     {
         report_problem_in_dir(ap_last_problem_dir, LIBREPORT_ANALYZE | LIBREPORT_NOWAIT);
 
@@ -172,6 +173,7 @@ static void action_open_gui(NotifyNotification *notification, gchar *action, gpo
         if (pid == 0)
         { /* child */
             signal(SIGCHLD, SIG_DFL); /* undo SIG_IGN in abrt-applet */
+//TODO: pass s_dirs[] as DIR param(s) to abrt-gui
             execl(BIN_DIR"/abrt-gui", "abrt-gui", (char*) NULL);
             /* Did not find abrt-gui in installation directory. Oh well */
             /* Trying to find it in PATH */
@@ -350,9 +352,8 @@ static void set_icon_tooltip(const char *format, ...)
     free(buf);
 }
 
-static void show_crash_notification(const char* crash_dir, const char *format, ...)
+static void show_crash_notification(const char *format, ...)
 {
-    ap_last_problem_dir = crash_dir;
     va_list args;
     va_start(args, format);
     char *buf = xvasprintf(format, args);
@@ -396,6 +397,7 @@ static void show_msg_notification(const char *format, ...)
                                     NULL, NULL);
     notify_notification_update(notification, _("A Problem has Occurred"), buf, NULL);
     free(buf);
+
     GError *err = NULL;
     notify_notification_show(notification, &err);
     if (err != NULL)
@@ -533,10 +535,9 @@ static void Crash(DBusMessage* signal)
      */
     static time_t last_time = 0;
     static char* last_package_name = NULL;
-    static char* last_dir = NULL;
     time_t cur_time = time(NULL);
     if (last_package_name && strcmp(last_package_name, package_name) == 0
-     && last_dir && strcmp(last_dir, dir) == 0
+     && ap_last_problem_dir && strcmp(ap_last_problem_dir, dir) == 0
      && (unsigned)(cur_time - last_time) < 2 * 60 * 60
     ) {
         log_msg("repeated crash in %s, not showing the notification", package_name);
@@ -545,10 +546,10 @@ static void Crash(DBusMessage* signal)
     last_time = cur_time;
     free(last_package_name);
     last_package_name = xstrdup(package_name);
-    free(last_dir);
-    last_dir = xstrdup(dir);
+    free(ap_last_problem_dir);
+    ap_last_problem_dir = xstrdup(dir);
 
-    show_crash_notification(dir, message, package_name);
+    show_crash_notification(message, package_name);
 }
 
 static void QuotaExceeded(DBusMessage* signal)
@@ -645,8 +646,107 @@ static void die_if_dbus_error(bool error_flag, DBusError* err, const char* msg)
     error_msg_and_die("%s", msg);
 }
 
+static GList *add_dirs_to_dirlist(GList *dirlist, const char *dirname)
+{
+    DIR *dir = opendir(dirname);
+    if (!dir)
+        return dirlist;
+
+    struct dirent *dent;
+    while ((dent = readdir(dir)) != NULL)
+    {
+        if (dot_or_dotdot(dent->d_name))
+            continue;
+        char *full_name = concat_path_file(dirname, dent->d_name);
+        struct stat statbuf;
+        if (lstat(full_name, &statbuf) == 0 && S_ISDIR(statbuf.st_mode))
+            dirlist = g_list_prepend(dirlist, full_name);
+        else
+            free(full_name);
+    }
+    closedir(dir);
+
+    return dirlist;
+}
+
+static int new_dir_exists(const char *home)
+{
+    int new_dir_exists = 0;
+
+    GList *dirlist = NULL;
+    char **pp = s_dirs;
+    while (*pp)
+    {
+        dirlist = add_dirs_to_dirlist(dirlist, *pp);
+        pp++;
+    }
+
+    char *dirlist_name = concat_path_file(home, ".abrt");
+    mkdir(dirlist_name, 0777);
+    free(dirlist_name);
+    dirlist_name = concat_path_file(home, ".abrt/applet_dirlist");
+    FILE *fp = fopen(dirlist_name, "r+");
+    if (!fp)
+        fp = fopen(dirlist_name, "w+");
+    free(dirlist_name);
+    if (fp)
+    {
+        GList *old_dirlist = NULL;
+        char *line;
+        while ((line = xmalloc_fgetline(fp)) != NULL)
+            old_dirlist = g_list_prepend(old_dirlist, line);
+
+        /* We will sort and compare current dir list with last known one.
+         * Possible combinations:
+         * DIR1 DIR1 - Both lists have the same element, advance both ptrs.
+         * DIR2      - Current dir list has new element. IOW: new dir exists!
+         *             Advance only current dirlist ptr.
+         *      DIR3 - Only old list has element. Advance only old ptr.
+         * DIR4 ==== - Old list ended, cuurent one didn't. New dir exists!
+         * ====
+         */
+        GList *l1 = dirlist = g_list_sort(dirlist, (GCompareFunc)strcmp);
+        GList *l2 = old_dirlist = g_list_sort(old_dirlist, (GCompareFunc)strcmp);
+        int different = 0;
+        while (l1 && l2)
+        {
+            int diff = strcmp(l1->data, l2->data);
+            different |= diff;
+            if (diff < 0)
+            {
+                new_dir_exists = 1;
+                l1 = g_list_next(l1);
+                continue;
+            }
+            l2 = g_list_next(l2);
+            if (diff == 0)
+                l1 = g_list_next(l1);
+        }
+        if (l1)
+            new_dir_exists = 1;
+        if (different || l1 || l2)
+        {
+            rewind(fp);
+            if (ftruncate(fileno(fp), 0)) /* shut up gcc */;
+            l1 = dirlist;
+            while (l1)
+            {
+                fprintf(fp, "%s\n", (char*) l1->data);
+                l1 = g_list_next(l1);
+            }
+        }
+        fclose(fp);
+        list_free_with_free(old_dirlist);
+    }
+    list_free_with_free(dirlist);
+
+    return new_dir_exists;
+}
+
 int main(int argc, char** argv)
 {
+    abrt_init(argv);
+
     /* I18n */
     setlocale(LC_ALL, "");
 #if ENABLE_NLS
@@ -659,27 +759,43 @@ int main(int argc, char** argv)
     gdk_threads_init();
     gdk_threads_enter();
 
-    /* Parse options */
-    int opt;
-    while ((opt = getopt(argc, argv, "v")) != -1)
-    {
-        switch (opt)
-        {
-        case 'v':
-            g_verbose++;
-            break;
-        default:
-            error_msg_and_die(
-                "Usage: abrt-applet [-v]\n"
-                "\nOptions:"
-                "\n\t-v\tBe verbose"
-            );
-        }
-    }
     gtk_init(&argc, &argv);
 
-    abrt_init(argv);
+    /* Can't keep these strings/structs static: _() doesn't support that */
+    const char *program_usage_string = _(
+        "\b [-v] [DIR]...\n"
+        "\n"
+        "Applet which notifies user when new problems are detected by ABRT\n"
+    );
+    enum {
+        OPT_v = 1 << 0,
+    };
+    /* Keep enum above and order of options below in sync! */
+    struct options program_options[] = {
+        OPT__VERBOSE(&g_verbose),
+        OPT_END()
+    };
+    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+
+    export_abrt_envvars(0);
     msg_prefix = g_progname;
+
+    char *home = getenv("HOME");
+
+    load_abrt_conf();
+    const char *default_dirs[] = {
+        g_settings_dump_location,
+        NULL,
+        NULL,
+    };
+    argv += optind;
+    if (!argv[0])
+    {
+        if (home)
+            default_dirs[1] = concat_path_file(home, ".abrt/spool");
+        argv = (char**)default_dirs;
+    }
+    s_dirs = argv;
 
     /* Prevent zombies when we spawn abrt-gui */
     signal(SIGCHLD, SIG_IGN);
@@ -730,6 +846,14 @@ int main(int argc, char** argv)
     int cnt = 10;
     while (dbus_connection_dispatch(system_conn) != DBUS_DISPATCH_COMPLETE && --cnt)
         continue;
+
+    /* If some new dirs appeared since our last run, let user know it */
+    if (home && new_dir_exists(home))
+    {
+        init_applet();
+        show_icon();
+        //show_msg_notification("New problems detected since last login");
+    }
 
     /* Enter main loop */
     gtk_main();
