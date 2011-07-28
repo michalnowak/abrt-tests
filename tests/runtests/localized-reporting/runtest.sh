@@ -42,7 +42,7 @@ rlJournalStart
 
     rlPhaseStartTest
         rlLogInfo "$(report-cli -l -f)"
-        DIR="$(report-cli -l -f | grep Directory | awk '{ print $2 }')"
+        DIR="$(report-cli -l -f | grep Directory | awk '{ print $2 }' | tail -n1)"
         rlLog "DIR=$DIR"
         rlRun 'echo -e "1\n1\n" | EDITOR="cat" LC_ALL="cs_CZ.UTF-8" report-cli -r $DIR 2>&1 | tee crash.log | grep "Problem reported via [0-9] report events"' 0 "There were attempts to report the crash"
         cat crash.log
@@ -52,9 +52,7 @@ rlJournalStart
         rlBundleLogs "crash.log" crash.log
         rlRun "popd"
         rlRun "rm -r $TmpDir" 0 "Removing tmp directory"
-        for dir in $(report-cli -l -f | grep Directory | awk '{ print $2 }'); do
-                report-cli -d $dir
-        done
+	rlRun "report-cli -d $DIR"
     rlPhaseEnd
 rlJournalPrintText
 rlJournalPrintText >> $ABRT_TESTOUT_ROOT/abrt-test-output.summary

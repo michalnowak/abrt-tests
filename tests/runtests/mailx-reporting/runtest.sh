@@ -41,7 +41,7 @@ rlJournalStart
         kill -11 %1
         sleep 3
         rlLog "report-cli: $(report-cli -l -f)"
-        PATH_D="$(report-cli -l -f | grep Directory | awk '{ print $2 }')"
+        PATH_D="$(report-cli -l -f | grep Directory | awk '{ print $2 }' | tail -n1)"
         rlLog "PATH_D = $PATH_D"
     rlPhaseEnd
 
