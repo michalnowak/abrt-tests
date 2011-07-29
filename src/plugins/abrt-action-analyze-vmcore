@@ -16,14 +16,12 @@ if ! test -f "/usr/lib/debug/lib/modules/$VER/vmlinux"; then
 	yum install --enablerepo=*debuginfo* "/usr/lib/debug/lib/modules/$VER/vmlinux"
 fi
 
-echo "Generation backtrace"
+echo "Generating backtrace"
 export TERM=dumb  # defeat gdb ESC sequence emission bug
-echo "log" | crash -s vmcore "/usr/lib/debug/lib/modules/$VER/vmlinux" >backtrace
-# TODO: it's actually a complete kernel log ring buffer.
-# We need to extract the actual oops from it...
-# ...which also solves a "what to put into 'reason' field" problem.
+echo "log" | crash -s vmcore "/usr/lib/debug/lib/modules/$VER/vmlinux" >kernel_log
+abrt-dump-oops -o kernel_log >backtrace
+tail -n +3 backtrace >backtrace1
+mv backtrace1 backtrace
 
-# ??? >reason
+head -n 1 backtrace >reason
 printf 'kernel-%s' "$VER" >package
-printf '%s' "`date '+%s'`" >time
-printf '0' >uid

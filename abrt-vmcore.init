@@ -1,22 +1,22 @@
 #!/bin/bash
-# Install ABRT coredump hook
+# Harvest vmcores for ABRT
 #
 # chkconfig: 35 82 16
 # description: Installs coredump handler which saves segfault data
 ### BEGIN INIT INFO
-# Provides: abrt-ccpp
+# Provides: abrt-vmcore
 # Required-Start: $abrtd
 # Default-Stop: 0 1 2 6
 # Default-Start: 3 5
-# Short-Description: Installs coredump handler which saves segfault data
-# Description: Installs coredump handler which saves segfault data
+# Short-Description: Collects vmcore (kernel crash data) for ABRT
+# Description: Collects vmcore (kernel crash data) for ABRT
 ### END INIT INFO
 
 # Source function library.
 . /etc/rc.d/init.d/functions
 
-LOCK="/var/lock/subsys/abrt-ccpp"
-INSTALL_HOOK="/usr/sbin/abrt-install-ccpp-hook"
+LOCK="/var/lock/subsys/abrt-vmcore"
+HARVEST_CMD="/usr/sbin/abrt-harvest-vmcore"
 
 RETVAL=0
 
@@ -27,8 +27,7 @@ check() {
 
 start() {
 	check
-
-	"$INSTALL_HOOK" install
+	"$HARVEST_CMD"
 	RETVAL=$?
 	[ $RETVAL -eq 0 ] && touch -- "$LOCK"
 	return $RETVAL
@@ -36,11 +35,8 @@ start() {
 
 stop() {
 	check
-
-	"$INSTALL_HOOK" uninstall
-	RETVAL=$?
-	[ $RETVAL -eq 0 ] && rm -f -- "$LOCK"
-	return $RETVAL
+	rm -f -- "$LOCK"
+	return 0
 }
 
 restart() {
@@ -70,10 +66,10 @@ restart)
 	restart
 	;;
 condrestart)
-	"$INSTALL_HOOK" is-installed && restart
+	test -f "$LOCK" && restart
 	;;
 status)
-	"$INSTALL_HOOK" is-installed && RETVAL=0 || RETVAL=3
+	test -f "$LOCK" && RETVAL=0 || RETVAL=3
 	;;
 *)
 	echo $"Usage: $0 {start|stop|status|restart|condrestart|reload|force-reload}"
